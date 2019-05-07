@@ -93,7 +93,7 @@ def make_initialized_nnd_search(dist, dist_args):
 
                 if vertex == -1:
                     break
-                candidates = indices[indptr[vertex] : indptr[vertex + 1]]
+                candidates = indices[indptr[vertex]: indptr[vertex + 1]]
                 for j in range(candidates.shape[0]):
                     if (
                         candidates[j] == vertex
@@ -150,6 +150,88 @@ def init_rp_tree(data, dist, dist_args, current_graph, leaf_array, tried=None):
 
 
 @numba.njit(fastmath=True)
+def nn_descent_v2(
+    data,
+    n_neighbors,
+    rng_state,
+    max_candidates=50,
+    dist=dist.euclidean,
+    dist_args=(),
+    n_iters=10,
+    delta=0.001,
+    rho=0.5,
+    rp_tree_init=True,
+    leaf_array=None,
+    verbose=False,
+    seed_per_row=False,
+):
+    n_vertices = data.shape[0]
+    tried = set([(-1, -1)])
+
+    current_graph = make_heap(n_vertices, n_neighbors)
+    for current_id, current_row in enumerate(data):
+        if seed_per_row:
+            seed(rng_state, i)
+        neighbor_indices = rejection_sample(n_neighbors, n_vertices, rng_state)
+        for neighbor_id in neighbor_indices:
+            neighbor_row = data[neighbor_id]
+            distance = dist(current_row, neighbor_row, *dist_args)
+            heap_push(current_graph, current_id, distance, neighbor_id, 1)
+            heap_push(current_graph, neighbor_id, distance, current_id, 1)
+            tried.add(sorted(neighbor_id, current_id))
+
+    if rp_tree_init:
+        init_rp_tree(data, dist, dist_args, current_graph,
+                     leaf_array, tried=tried)
+
+    for n in range(n_iters):
+        (new_candidate_neighbors, old_candidate_neighbors) = new_build_candidates(
+            current_graph,
+            n_vertices,
+            n_neighbors,
+            max_candidates,
+            rng_state,
+            rho,
+            seed_per_row,
+        )
+
+        c = 0
+        for i in range(n_vertices):
+            for j in range(max_candidates):
+                p = int(new_candidate_neighbors[0, i, j])
+                if p < 0:
+                    continue
+                for k in range(j, max_candidates):
+                    q = int(new_candidate_neighbors[0, i, k])
+                    if q < 0 or (p, q) in tried:
+                        continue
+
+                    d = dist(data[p], data[q], *dist_args)
+                    c += unchecked_heap_push(current_graph, p, d, q, 1)
+                    tried.add((p, q))
+                    if p != q:
+                        c += unchecked_heap_push(current_graph, q, d, p, 1)
+                        tried.add((q, p))
+
+                for k in range(max_candidates):
+                    q = int(old_candidate_neighbors[0, i, k])
+                    if q < 0 or (p, q) in tried:
+                        continue
+
+                    d = dist(data[p], data[q], *dist_args)
+                    c += unchecked_heap_push(current_graph, p, d, q, 1)
+                    tried.add((p, q))
+                    if p != q:
+                        c += unchecked_heap_push(current_graph, q, d, p, 1)
+                        tried.add((q, p))
+
+        if c <= delta * n_neighbors * data.shape[0]:
+            break
+
+    return deheap_sort(current_graph)
+
+
+@numba.njit(fastmath=True)
 def nn_descent(
     data,
     n_neighbors,
@@ -181,7 +263,8 @@ def nn_descent(
             tried.add((indices[j], i))
 
     if rp_tree_init:
-        init_rp_tree(data, dist, dist_args, current_graph, leaf_array, tried=tried)
+        init_rp_tree(data, dist, dist_args, current_graph,
+                     leaf_array, tried=tried)
 
     for n in range(n_iters):
 
@@ -246,7 +329,8 @@ def initialize_heaps(data, n_neighbors, leaf_array, dist=dist.euclidean, dist_ar
                 if (leaf_array[n, i], leaf_array[n, j]) in tried:
                     continue
 
-                d = dist(data[leaf_array[n, i]], data[leaf_array[n, j]], *dist_args)
+                d = dist(data[leaf_array[n, i]],
+                         data[leaf_array[n, j]], *dist_args)
                 unchecked_heap_push(
                     graph_heap, leaf_array[n, i], d, leaf_array[n, j], 1
                 )
@@ -501,7 +585,8 @@ class NNDescent(object):
         elif metric in dist.named_distances:
             self._distance_func = dist.named_distances[metric]
         else:
-            raise ValueError("Metric is neither callable, " + "nor a recognised string")
+            raise ValueError("Metric is neither callable, " +
+                             "nor a recognised string")
 
         if metric in ("cosine", "correlation", "dice", "jaccard"):
             self._angular_trees = True
@@ -525,7 +610,8 @@ class NNDescent(object):
 
         if algorithm == "threaded":
             if verbose:
-                print(ts(), "threaded NN descent for", str(n_iters), "iterations")
+                print(ts(), "threaded NN descent for",
+                      str(n_iters), "iterations")
             self._neighbor_graph = threaded.nn_descent(
                 self._raw_data,
                 self.n_neighbors,
@@ -551,13 +637,15 @@ class NNDescent(object):
                         metric_kwds["n_features"] = self._raw_data.shape[1]
                 else:
                     raise ValueError(
-                        "Metric {} not supported for sparse data".format(metric)
+                        "Metric {} not supported for sparse data".format(
+                            metric)
                     )
                 metric_nn_descent = sparse.make_sparse_nn_descent(
                     distance_func, tuple(metric_kwds.values())
                 )
                 if verbose:
-                    print(ts(), "metric NN descent for", str(n_iters), "iterations")
+                    print(ts(), "metric NN descent for",
+                          str(n_iters), "iterations")
 
                 self._neighbor_graph = metric_nn_descent(
                     self._raw_data.indices,
@@ -641,7 +729,8 @@ class NNDescent(object):
             self._distance_func, self._dist_args
         )
 
-        self._search = make_initialized_nnd_search(self._distance_func, self._dist_args)
+        self._search = make_initialized_nnd_search(
+            self._distance_func, self._dist_args)
 
         return
 
